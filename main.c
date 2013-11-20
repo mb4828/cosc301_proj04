@@ -74,9 +74,8 @@ void gen_log(char *retbuffer, char *filename, struct work_queue_item *item, int 
 	strcpy(logbuffer, (char*)&(item->address));
 	strcat(logbuffer, ":");
 	strcat(logbuffer, (char*)portstr);
-	strcat(logbuffer, " ");
 	strcat(logbuffer, strtok(ctime(&now),"\n"));
-	strcat(logbuffer, " \"GET /");
+	strcat(logbuffer, " \"GET ");
 	strcat(logbuffer, filename);
 
 	if (fail)
@@ -90,14 +89,17 @@ void gen_log(char *retbuffer, char *filename, struct work_queue_item *item, int 
 }
 
 void *worker_thread() {
+	printf("Worker initialized\n");
 	while (still_running || queue_count > 0) {
 		struct work_queue_item *tmp;
 
 		// wait for item and remove from head
 		pthread_mutex_lock(&work_mutex);
 		while (queue_count==0) {
+			printf("Worker going to sleep\n");
 			pthread_cond_wait(&work_cond, &work_mutex);
 		}
+		printf("Worker received request\n");
 		tmp = head;
 		if (head->next == NULL) {
 			head = NULL;
@@ -109,6 +111,7 @@ void *worker_thread() {
 		pthread_mutex_unlock(&work_mutex);
 
 		// respond to request
+		printf("Worker responding to request\n");
 		char filename[1024];
 		char sendbuffer[4096];
 		int filesize=strlen(HTTP_404);
@@ -118,23 +121,27 @@ void *worker_thread() {
 		if (getrequest(tmp->sock, (char*)&filename, 1024) == 0) {
 			// request was successful - we have filename
 			fix_buffer((char*)&filename);
+			printf("Filename: %s\n",filename);
 
 			if (test_file((char*)&filename,&filesize)==0) {
 				// file exists - we have the size of the file
 				fd = open((char*)&filename, O_RDONLY);
+				printf("File exists\n");
 
 				if (fd != -1) {
 					// file successfully opened; send data!
+					printf("Sending data...\n");
 					fail=0;
 					char *header = HTTP_200,filesize;
 					senddata(tmp->sock, header, strlen(header));
 					filesize += strlen(header);
 
 					while (read(fd, (char*)&sendbuffer, 4096) != 0) {
-						senddata(tmp->sock, &sendbuffer, 4096);
+						senddata(tmp->sock, (char*)&sendbuffer, 4096);
 					}
 
-					close(fd);
+					close(fd);	
+					printf("Data transfer complete\n");
 				}
 			}
 		}
@@ -145,10 +152,13 @@ void *worker_thread() {
 		}
 
 		// log request
+		printf("Logging request\n");
 		char logbuffer[1025];
-
 		gen_log((char*)&logbuffer, (char*)&filename, tmp, fail, filesize);
+
+		pthread_mutex_lock(&write_mutex);
 		fputs(logbuffer, logfile);
+		pthread_mutex_unlock(&write_mutex);
 
 		free(tmp);
 	}
@@ -168,7 +178,8 @@ void runserver(int numthreads, unsigned short serverport) {
 	// create worker threads
 	pthread_t workers[numthreads];
 	int i=0;
-	for (; i < numthreads-1; i++) {
+	for (; i < numthreads; i++) {
+		printf("Creating worker %d\n",i);
 		pthread_create(&workers[i], NULL, worker_thread, NULL);
 	}
     
@@ -230,6 +241,7 @@ void runserver(int numthreads, unsigned short serverport) {
 			pthread_cond_signal(&work_cond);
 
 			pthread_mutex_unlock(&work_mutex);
+			printf("Connection handed off to worker\n");
 
         }
     }
