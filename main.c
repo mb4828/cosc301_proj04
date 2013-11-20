@@ -42,16 +42,9 @@ void usage(const char *progname) {
 }
 
 /* Removes the / from the beginning of a buffer if it is present */
-void fix_buffer(char *buf, int size) {
-	char buffer[size] = *buf;
+void fix_buffer(char *buffer) {
 	if ((char)buffer[0] == '/') {
-		int i=0;
-		for (; i<(size-1); i++) {
-			buffer[i] = buffer[i+1];
-			if ((char)buffer[i] == '\0')
-				break;
-		}
-		*buf = buffer;
+		strcpy(buffer, buffer+1);
 	}
 }
 
@@ -59,14 +52,41 @@ void fix_buffer(char *buf, int size) {
  * If it exists, updates size to indicate size of file
  * Returns 0 if successful and -1 otherwise
  */
-int test_file(char *buf, int buffsize, int *size) {
-	char buffer[buffsize] = *buf;
+int test_file(char *buffer, int *size) {
 	struct stat st;
 	if (stat(buffer, &st)==0) {
 		*size = (int) st.st_size;
 		return 0;
 	}
 	return -1;
+}
+
+/* Generates and returns a log entry string */
+void gen_log(char *retbuffer, char *filename, struct work_queue_item *item, int fail, int size) {
+	char logbuffer[1024];
+	time_t now = time(NULL);
+
+	char portstr[10];	
+	sprintf((char*)&portstr, "%d ", item->port);
+	char sizestr[10];
+	sprintf((char*)&sizestr, "%d\n\0", size);
+	
+	strcpy(logbuffer, (char*)&(item->address));
+	strcat(logbuffer, ":");
+	strcat(logbuffer, (char*)portstr);
+	strcat(logbuffer, " ");
+	strcat(logbuffer, strtok(ctime(&now),"\n"));
+	strcat(logbuffer, " \"GET /");
+	strcat(logbuffer, filename);
+
+	if (fail)
+		strcat(logbuffer, "\" 404 ");
+	else
+		strcat(logbuffer, "\" 200 ");
+
+	strcat(logbuffer, (char*)sizestr);
+
+	strcpy(retbuffer, logbuffer);
 }
 
 void *worker_thread() {
@@ -91,24 +111,26 @@ void *worker_thread() {
 		// respond to request
 		char filename[1024];
 		char sendbuffer[4096];
-		int filesize;
+		int filesize=strlen(HTTP_404);
 		int fd;
 		int fail=1;
 
-		if (getrequest(tmp->sock, &filename, 1024) == 0) {
+		if (getrequest(tmp->sock, (char*)&filename, 1024) == 0) {
 			// request was successful - we have filename
-			fix_buffer(&filename, 1024);
+			fix_buffer((char*)&filename);
 
-			if (test_file(&filename,1024,&filesize)==0) {
+			if (test_file((char*)&filename,&filesize)==0) {
 				// file exists - we have the size of the file
-				fd = open(&filename, O_RDONLY);
+				fd = open((char*)&filename, O_RDONLY);
 
 				if (fd != -1) {
 					// file successfully opened; send data!
 					fail=0;
-					senddata(tmp->sock, (HTTP_200,filesize), strlen((HTTP_200,filesize)));
+					char *header = HTTP_200,filesize;
+					senddata(tmp->sock, header, strlen(header));
+					filesize += strlen(header);
 
-					while (read(fd, &sendbuffer, 4096) != 0) {
+					while (read(fd, (char*)&sendbuffer, 4096) != 0) {
 						senddata(tmp->sock, &sendbuffer, 4096);
 					}
 
@@ -119,23 +141,14 @@ void *worker_thread() {
 
 		if (fail) {
 			// failed to open/access file at some point along the way
-			senddata(tmp->sock, HTTP_404, strlen(HTTP_404));
+			senddata(tmp->sock, HTTP_404, filesize);
 		}
 
 		// log request
-		char *logbuffer;
-		char portstr[10];
-		sprintf(&portstr, "%d ", tmp->port);
+		char logbuffer[1025];
 
-		if (!fail) {
-			strcpy(logbuffer, &(tmp->address));
-			strcat(logbuffer, ":");
-			strcat(logbuffer, &(tmp->portstr));
-			fputs()
-		}
-		else {
-
-		}
+		gen_log((char*)&logbuffer, (char*)&filename, tmp, fail, filesize);
+		fputs(logbuffer, logfile);
 
 		free(tmp);
 	}
@@ -200,7 +213,7 @@ void runserver(int numthreads, unsigned short serverport) {
             */
 			struct work_queue_item *new_item = (struct work_queue_item*) malloc(sizeof(struct work_queue_item));
 			new_item->sock = new_sock;
-			new_item->address = inet_ntoa(client_address.sin_addr);
+			strcpy(new_item->address,inet_ntoa(client_address.sin_addr));
 			new_item->port = ntohs(client_address.sin_port);
 			new_item->next = NULL;
 
