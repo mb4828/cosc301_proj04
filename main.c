@@ -96,6 +96,7 @@ void *worker_thread() {
 		while (queue_count==0) {
 			pthread_cond_wait(&work_cond, &work_mutex);
 			if (!still_running) {
+				pthread_mutex_unlock(&work_mutex);
 				return NULL;
 			}
 		}
@@ -247,20 +248,16 @@ void runserver(int numthreads, unsigned short serverport) {
 
 	for (i=0; i<numthreads; i++) {
 		int fail = 1;
-		int count = 0;
-		/* 
-		 * I've been trying to get this to work so the threads will join without
-		 * having to kill them, but I can't figure out what the problem is.
-		 */
+		int count = 1;
 		while (fail != 0) {
-			pthread_cond_broadcast(&work_cond);
+			pthread_cond_signal(&work_cond);
 			fail = pthread_tryjoin_np(workers[i],NULL);
-			count++;
 			if (count > numthreads) {
-				// murder thread if no other options remain
+				// murder thread if all else fails
 				pthread_cancel(workers[i]);
 				break;
 			}
+			count++;
 		}
 	}
 
@@ -275,7 +272,7 @@ void runserver(int numthreads, unsigned short serverport) {
 
 int main(int argc, char **argv) {
     unsigned short port = 3000;
-    int num_threads = 100;
+    int num_threads = 4;
 
     int c;
     while (-1 != (c = getopt(argc, argv, "hp:t:"))) {
