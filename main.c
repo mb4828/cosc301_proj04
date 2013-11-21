@@ -42,10 +42,11 @@ void usage(const char *progname) {
 }
 
 /* Removes the / from the beginning of a buffer if it is present */
-void fix_buffer(char *buffer) {
+char *fix_buffer(char *buffer) {
 	if ((char)buffer[0] == '/') {
-		strcpy(buffer, buffer+1);
+		return buffer+1;
 	}
+	return buffer;
 }
 
 /* Tests to see if a file exists, path indicated by a buffer
@@ -89,17 +90,17 @@ void gen_log(char *retbuffer, char *filename, struct work_queue_item *item, int 
 }
 
 void *worker_thread() {
-	printf("Worker initialized\n");
 	while (still_running || queue_count > 0) {
-		struct work_queue_item *tmp;
-
 		// wait for item and remove from head
 		pthread_mutex_lock(&work_mutex);
 		while (queue_count==0) {
-			printf("Worker going to sleep\n");
 			pthread_cond_wait(&work_cond, &work_mutex);
+			if (!still_running) {
+				return NULL;
+			}
 		}
-		printf("Worker received request\n");
+
+		struct work_queue_item *tmp;
 		tmp = head;
 		if (head->next == NULL) {
 			head = NULL;
@@ -111,50 +112,49 @@ void *worker_thread() {
 		pthread_mutex_unlock(&work_mutex);
 
 		// respond to request
-		printf("Worker responding to request\n");
-		char filename[1024];
+		char name[1024];
+		char *filename;
 		char sendbuffer[4096];
 		int filesize=strlen(HTTP_404);
 		int fd;
 		int fail=1;
 
-		if (getrequest(tmp->sock, (char*)&filename, 1024) == 0) {
+		if (getrequest(tmp->sock, (char*)&name, 1024) == 0) {
 			// request was successful - we have filename
-			fix_buffer((char*)&filename);
-			printf("Filename: %s\n",filename);
+			filename = fix_buffer((char*)&name);
 
-			if (test_file((char*)&filename,&filesize)==0) {
+			if (test_file(filename,&filesize)==0) {
 				// file exists - we have the size of the file
-				fd = open((char*)&filename, O_RDONLY);
-				printf("File exists\n");
+				fd = open(filename, O_RDONLY);
 
 				if (fd != -1) {
 					// file successfully opened; send data!
-					printf("Sending data...\n");
 					fail=0;
-					char *header = HTTP_200,filesize;
-					senddata(tmp->sock, header, strlen(header));
-					filesize += strlen(header);
+					sprintf((char*)&sendbuffer, HTTP_200, filesize);
+					senddata(tmp->sock, (char*)&sendbuffer, strlen(sendbuffer));
+					filesize += strlen(sendbuffer);
 
-					while (read(fd, (char*)&sendbuffer, 4096) != 0) {
-						senddata(tmp->sock, (char*)&sendbuffer, 4096);
+					int length = read(fd, (char*)&sendbuffer, 4096);
+					while (length != 0) {
+						senddata(tmp->sock, (char*)&sendbuffer, length);
+						length = read(fd, (char*)&sendbuffer, 4096);
 					}
 
 					close(fd);	
-					printf("Data transfer complete\n");
+					printf("Data sent\n\n");
 				}
 			}
 		}
 
 		if (fail) {
 			// failed to open/access file at some point along the way
+			printf("File does not exist. Sending 404 error\n\n");
 			senddata(tmp->sock, HTTP_404, filesize);
 		}
 
 		// log request
-		printf("Logging request\n");
 		char logbuffer[1025];
-		gen_log((char*)&logbuffer, (char*)&filename, tmp, fail, filesize);
+		gen_log((char*)&logbuffer, filename, tmp, fail, filesize);
 
 		pthread_mutex_lock(&write_mutex);
 		fputs(logbuffer, logfile);
@@ -167,7 +167,7 @@ void *worker_thread() {
 }
 
 void runserver(int numthreads, unsigned short serverport) {
-	// open/create log file
+	// initialize log file
 	logfile = fopen("weblog.txt","a");
 
 	// initialize mutex/condition variables
@@ -179,7 +179,6 @@ void runserver(int numthreads, unsigned short serverport) {
 	pthread_t workers[numthreads];
 	int i=0;
 	for (; i < numthreads; i++) {
-		printf("Creating worker %d\n",i);
 		pthread_create(&workers[i], NULL, worker_thread, NULL);
 	}
     
@@ -213,7 +212,7 @@ void runserver(int numthreads, unsigned short serverport) {
         if (new_sock > 0) {
             
             time_t now = time(NULL);
-            fprintf(stderr, "Got connection from %s:%d at %s\n", inet_ntoa(client_address.sin_addr), ntohs(client_address.sin_port), ctime(&now));
+            fprintf(stderr, "Got connection from %s:%d at %s", inet_ntoa(client_address.sin_addr), ntohs(client_address.sin_port), ctime(&now));
 
            /* You got a new connection.  Hand the connection off
             * to one of the threads in the pool to process the
@@ -241,19 +240,34 @@ void runserver(int numthreads, unsigned short serverport) {
 			pthread_cond_signal(&work_cond);
 
 			pthread_mutex_unlock(&work_mutex);
-			printf("Connection handed off to worker\n");
 
         }
     }
     fprintf(stderr, "Server shutting down.\n");
 
+	for (i=0; i<numthreads; i++) {
+		int fail = 1;
+		int count = 0;
+		/* 
+		 * I've been trying to get this to work so the threads will join without
+		 * having to kill them, but I can't figure out what the problem is.
+		 */
+		while (fail != 0) {
+			pthread_cond_broadcast(&work_cond);
+			fail = pthread_tryjoin_np(workers[i],NULL);
+			count++;
+			if (count > numthreads) {
+				// murder thread if no other options remain
+				pthread_cancel(workers[i]);
+				break;
+			}
+		}
+	}
+
 	free (head);
 	free (tail);
     close(main_socket);
 	fclose(logfile);
-	for (i=0; i < numthreads-1; i++) {
-		pthread_join(workers[i], NULL);
-	}
 	pthread_cond_destroy(&work_cond);
     pthread_mutex_destroy(&work_mutex);
 }
@@ -261,7 +275,7 @@ void runserver(int numthreads, unsigned short serverport) {
 
 int main(int argc, char **argv) {
     unsigned short port = 3000;
-    int num_threads = 1;
+    int num_threads = 100;
 
     int c;
     while (-1 != (c = getopt(argc, argv, "hp:t:"))) {
